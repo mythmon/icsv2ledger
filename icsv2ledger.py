@@ -477,9 +477,10 @@ class MappingInfo:
     pattern: Pattern[AnyStr]
     payee: str
     account: str
-    tags: [str]
-    transfer_to: Optional[str]
-    transfer_to_file: Optional[str]
+    tags: [str] = list
+    note: Optional[str] = None
+    transfer_to: Optional[str] = None
+    transfer_to_file: Optional[str] = None
 
 
 class Entry:
@@ -569,7 +570,7 @@ class Entry:
             self.desc,
             self.credit if self.credit else "-" + self.debit)
 
-    def _build_entry_str(self, transaction_index, payee, credit_account, debit_account, tags) -> str:
+    def _build_entry_str(self, transaction_index, payee, credit_account, debit_account, tags, note) -> str:
         """
         Return a formatted journal entry recording this Entry against
         the specified Ledger account
@@ -611,7 +612,8 @@ class Entry:
 
             'tags': tags,
             'md5sum': self.md5sum,
-            'csv': self.raw_csv}
+            'csv': self.raw_csv,
+            'note': f'; {note}' if note else ''}
         format_data.update(self.addons)
 
         # generate and clean output
@@ -620,11 +622,11 @@ class Entry:
 
         return output
 
-    def journal_entry(self, transaction_index, payee, debit_account, tags):
-        return self._build_entry_str(transaction_index, payee, self.credit_account, debit_account, tags)
+    def journal_entry(self, transaction_index, payee, debit_account, tags, note):
+        return self._build_entry_str(transaction_index, payee, self.credit_account, debit_account, tags, note)
 
-    def transfer_entry(self, transaction_index, payee, account, transfer_to, tags):
-        return self._build_entry_str(transaction_index, payee, account, transfer_to, tags)
+    def transfer_entry(self, transaction_index, payee, account, transfer_to, tags, note):
+        return self._build_entry_str(transaction_index, payee, account, transfer_to, tags, note)
 
 
 def get_field_at_index(fields, index, csv_decimal_comma, ledger_decimal_comma):
@@ -720,10 +722,13 @@ def from_ledger(ledger_file, ledger_binary_file, command):
 
 def read_mapping_file(map_file) -> [MappingInfo]:
     """
-    Mappings are simply a CSV file with three columns.
-    The first is a string to be matched against an entry description.
-    The second is the payee against which such entries should be posted.
-    The third is the account against which such entries should be posted.
+    Mappings are simply a CSV file with the following columns:
+    1. A string to be matched against an entry description.
+    2. The payee against which such entries should be posted.
+    3. The account against which such entries should be posted.
+
+    The remaining columns are taken to be tags unless they start with
+    "transfer_to"", "file=" or "note=".
 
     If the match string begins and ends with '/' it is taken to be a
     regular expression.
@@ -736,9 +741,21 @@ def read_mapping_file(map_file) -> [MappingInfo]:
                 pattern = row[0].strip()
                 payee = row[1].strip()
                 account = row[2].strip()
-                tags = [col for col in row[3:] if not col.startswith(("transfer_to", "file"))]
-                transfer_to = row[3].split('=')[1].strip() if ''.join(row[3:]).startswith("transfer_to=") else None
-                transfer_to_file = row[4].split('=')[1].strip() if ''.join(row[4:]).startswith("file=") else None
+                tags = [col for col in row[3:] if not col.startswith(("transfer_to=", "file=", "note="))]
+
+                transfer_to = None
+                transfer_to_file = None
+                note = None
+
+                for entry in row[3:]:
+                    if '=' in entry:
+                        key, val = [p.strip() for p in entry.split('=')]
+                        if key == 'transfer_to':
+                            transfer_to = val
+                        elif key == 'file':
+                            transfer_to_file = val
+                        elif key == 'note':
+                            note = val
 
                 if pattern.startswith('/') and pattern.endswith('/'):
                     try:
@@ -748,7 +765,15 @@ def read_mapping_file(map_file) -> [MappingInfo]:
                               .format(pattern, map_file, e),
                               file=sys.stderr)
                         sys.exit(1)
-                mappings.append(MappingInfo(pattern, payee, account, tags, transfer_to, transfer_to_file))
+                mappings.append(MappingInfo(
+                    pattern=pattern,
+                    payee=payee,
+                    account=account,
+                    tags=tags,
+                    note=note,
+                    transfer_to=transfer_to,
+                    transfer_to_file=transfer_to_file
+                ))
     return mappings
 
 
@@ -773,11 +798,14 @@ def read_accounts_file(account_file):
     return accounts
 
 
-def append_mapping_file(map_file, desc, payee, account, tags):
+def append_mapping_file(map_file, mapping):
     if map_file:
         with open(map_file, 'a', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([desc, payee, account] + tags)
+            row = [mapping.pattern, mapping.payee, mapping.account] + mapping.tags
+            if mapping.note:
+                row.append(f'note={mapping.note}')
+            writer.writerow(row)
 
 
 def tagify(value):
@@ -803,7 +831,6 @@ def prompt_for_tags(prompt, values, default):
 
 
 def prompt_for_value(prompt, values, default):
-
     def completer(text, state):
         for val in values:
             if text.upper() in val.upper():
@@ -823,7 +850,8 @@ def prompt_for_value(prompt, values, default):
     else:
         readline.parse_and_bind("tab: complete")
 
-    return input('{0} [{1}] > '.format(prompt, default))
+    rv = input('{0} [{1}] > '.format(prompt, default))
+    return rv
 
 
 def reset_stdin():
@@ -851,6 +879,7 @@ def main(options):
     possible_accounts = set([])
     possible_payees = set([])
     possible_tags = set([])
+    possible_notes = set([])
     md5sum_hashes = set()
     csv_comments = set()
     if options.ledger_file:
@@ -871,11 +900,14 @@ def main(options):
         possible_payees.add(m.payee)
         possible_accounts.add(m.account)
         possible_tags.update(set(m.tags))
+        if m.note:
+            possible_notes.add(m.note)
 
     def get_payee_and_account(entry):
         payee = entry.desc
         account = options.default_expense
         tags = []
+        note = ''
         transfer_to = None
         transfer_to_file = None
         found = False
@@ -884,7 +916,7 @@ def main(options):
             pattern = m.pattern
             if isinstance(pattern, str):
                 if entry.desc == pattern:
-                    payee, account, tags = m.payee, m.account, m.tags
+                    payee, account, tags, note = m.payee, m.account, m.tags, m.note
                     transfer_to, transfer_to_file = m.transfer_to, m.transfer_to_file
                     found = True  # do not break here, later mapping must win
             else:
@@ -898,6 +930,7 @@ def main(options):
                         payee = m.pattern.sub(m.payee, entry.desc)
                     account, tags = m.account, m.tags
                     transfer_to, transfer_to_file = m.transfer_to, m.transfer_to_file
+                    note = m.note
                     found = True
 
         modified = False
@@ -911,15 +944,22 @@ def main(options):
             if value:
                 modified = modified if modified else value != payee
                 payee = value
+
             value = prompt_for_value('Account', possible_accounts, account)
             if value:
                 modified = modified if modified else value != account
                 account = value
+
             if options.tags:
                 value = prompt_for_tags('Tag', possible_tags, tags)
                 if value:
                     modified = modified if modified else value != tags
                     tags = value
+
+            value = prompt_for_value('Note', possible_notes, note)
+            if value:
+                modified = modified if modified else value != note
+                note = value
 
         if not found or (found and modified):
             value = 'Y'
@@ -930,15 +970,15 @@ def main(options):
                     value = yn_response
             if value.upper().strip() not in ('N', 'NO'):
                 # Add new or changed mapping to mappings and append to file
-                mappings.append(MappingInfo(entry.desc, payee, account, tags, None, None))
-                append_mapping_file(options.mapping_file,
-                                entry.desc, payee, account, tags)
+                mapping =  MappingInfo(pattern=entry.desc, payee=payee, account=account, tags=tags, note=note)
+                mappings.append(mapping)
+                append_mapping_file(options.mapping_file, mapping)
 
             # Add new possible_values to possible values lists
             possible_payees.add(payee)
             possible_accounts.add(account)
 
-        return (payee, account, tags, transfer_to, transfer_to_file)
+        return (payee, account, tags, note, transfer_to, transfer_to_file)
 
     def process_input_output(in_file, out_file):
         """ Read CSV lines either from filename or stdin.
@@ -981,8 +1021,7 @@ def main(options):
             if len(row) == 0:
                 continue
 
-            entry = Entry(row, csv_lines[i],
-                          options)
+            entry = Entry(row, csv_lines[i], options)
 
             # detect duplicate entries in the ledger file and optionally skip or prompt user for action
             # if options.skip_dupes and csv_lines[i].strip() in csv_comments:
@@ -1000,14 +1039,14 @@ def main(options):
                     if value.upper().strip() not in ('N', 'NO'):
                         continue
                 while True:
-                    payee, account, tags, transfer_to, transfer_to_file = get_payee_and_account(entry)
+                    payee, account, tags, note, transfer_to, transfer_to_file = get_payee_and_account(entry)
                     value = 'C'
                     if options.entry_review:
                         # need to display ledger formatted entry here
                         #
                         # request confirmation before committing transaction
                         print('\n' + 'Ledger Entry:')
-                        print(entry.journal_entry(transaction_index + 1, payee, account, tags))
+                        print(entry.journal_entry(transaction_index + 1, payee, account, tags, note))
                         yn_response = prompt_for_value('Commit transaction (Commit, Modify, Skip)?', ('C', 'M', 'S'),
                                                        value)
                         if yn_response:
@@ -1025,7 +1064,7 @@ def main(options):
                     continue
 
                 transaction_index += 1
-                yield entry.journal_entry(transaction_index, payee, account, tags)
+                yield entry.journal_entry(transaction_index, payee, account, tags, note)
 
                 if transfer_to is not None:
                     transaction_index += 1
