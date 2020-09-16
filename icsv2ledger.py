@@ -817,8 +817,12 @@ def tagify(value):
 def prompt_for_tags(prompt, values, default):
     tags = list(default)
     value = prompt_for_value(prompt, values, ", ".join(tags))
+    if not value:
+        return None
     while value:
-        if value[0] == '-':
+        if value == '-':
+            tags = []
+        elif value[0] == '-':
             value = tagify(value[1:])
             if value in tags:
                 tags.remove(value)
@@ -952,12 +956,14 @@ def main(options):
 
             if options.tags:
                 value = prompt_for_tags('Tag', possible_tags, tags)
-                if value:
+                if value is not None:
                     modified = modified if modified else value != tags
                     tags = value
 
             value = prompt_for_value('Note', possible_notes, note)
             if value:
+                if value == '-':
+                    value = ''
                 modified = modified if modified else value != note
                 note = value
 
