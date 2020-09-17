@@ -351,6 +351,10 @@ def parse_args_and_config_file():
         help=('CSV column number matching credit amount'
               ' (default: {0})'.format(DEFAULTS.credit)))
     parser.add_argument(
+        '--invert',
+        action='store_true',
+        help=('if set, all values read from the CSV file will have their signs flipped'))
+    parser.add_argument(
         '--csv-date-format',
         metavar='STR',
         help=('date format in CSV input file'
@@ -538,6 +542,17 @@ class Entry:
             self.credit = ''
         elif self.credit and self.debit and atof(self.debit) == 0:
             self.debit  = ''
+
+        if options.invert:
+            if self.credit.startswith('-'):
+                self.credit = self.credit[1:]
+            elif self.credit:
+                self.credit = '-' + self.credit
+
+            if self.debit.startswith('-'):
+                self.debit = self.debit[1:]
+            elif self.debit:
+                self.debit = '-' + self.debit
 
         self.credit_account = options.account
         if options.src_account:
